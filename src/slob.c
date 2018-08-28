@@ -87,7 +87,7 @@ struct page_cache_head {
 };
 
 typedef unsigned short kmalloc_meta_data;
-#define KMALLOC_SIZE_BUF_SIZE (sizeof(kmalloc_meta_data) << 3)
+#define BYTES_OF_META_DATA (sizeof(kmalloc_meta_data))
 
 
 inline static unsigned short get_kmalloc_size(kmalloc_meta_data kmeta)
@@ -267,25 +267,10 @@ static void slob_free_pages(void *b, int order)
 	free_pages((unsigned long)b, order);
 }
 
-char check_address(void *addr, void *page_head, size_t size)
-{
-        unsigned long diff = ((unsigned long)addr - (unsigned long)page_cache_get_head(page_head));
-        return diff % size == 0;
-}
-
-static void *resolve_invalid_address(void *address, size_t size)
-{
-        struct page_cache_head *page_head;
-        unsigned long diff;
-        page_head = (struct page_cache_head *)((unsigned long)address & PAGE_MASK);
-        diff = address - (void *)page_cache_get_head(page_head);
-        return (void *)(page_cache_get_head(page_head) + (page_head->size * (diff / size)));
-}
-
 static void *sloba_alloc_from_freelist(struct page_cache_head *page_head, size_t size)
 {
         // available space is found in freelist
-        if(page_head->freelist && check_address(page_head->freelist, page_head, size)){
+        if(page_head->freelist){
                 void *ret = page_head->freelist;
                 page_head->freelist = *(void **)ret;
                 return ret;
@@ -363,18 +348,18 @@ static void *slob_alloc(size_t size, gfp_t gfp, int align, int node, char way)
 
 done:
         page_head->counter++;
-        ret = (void *)ALIGN((unsigned long)b, align);
-        
-	if (unlikely(gfp & __GFP_ZERO))
-		memset(ret, 0, size);
+        ret = (void *)ALIGN((unsigned long)b + sizeof(kmalloc_meta_data), align);
 
-        if (way == KMALLOC_ALLOCATE) {
+        {
                 int delta = ret - b;
                 spin_lock_irqsave(&slob_lock, flags);
-                *(kmalloc_meta_data *)ret = encode_kmalloc_meta_data(size - KMALLOC_SIZE_BUF_SIZE, delta);
-                spin_unlock_irqrestore(&slob_lock, flags);
-                ret += KMALLOC_SIZE_BUF_SIZE;
+                *((kmalloc_meta_data *)ret - 1) = encode_kmalloc_meta_data(size - sizeof(kmalloc_meta_data), delta);
         }
+
+	if (unlikely(gfp & __GFP_ZERO))
+		memset(ret, 0, size - sizeof(kmalloc_meta_data));
+
+        spin_unlock_irqrestore(&slob_lock, flags);
         
 	return ret;
 }
@@ -416,7 +401,7 @@ static __always_inline void *
 __do_kmalloc_node(size_t size, gfp_t gfp, int node, unsigned long caller)
 {
         int align = max_t(size_t, ARCH_KMALLOC_MINALIGN, ARCH_SLAB_MINALIGN);
-        size_t aligned = (size + KMALLOC_SIZE_BUF_SIZE);
+        size_t aligned = (size + sizeof(kmalloc_meta_data));
 	void *ret;
 
 	gfp &= gfp_allowed_mask;
@@ -481,8 +466,8 @@ void kfree(const void *block)
 
 	sp = virt_to_page(block);
 	if (PageSlab(sp)) {
-                kmalloc_meta_data *kmeta = (kmalloc_meta_data *)((void *)block - KMALLOC_SIZE_BUF_SIZE);
-		slob_free((void *)kmeta - get_kmalloc_delta(*kmeta), ksize(block) + sizeof(kmalloc_meta_data));
+                kmalloc_meta_data *kmeta = (kmalloc_meta_data *)((void *)block - BYTES_OF_META_DATA);
+		slob_free(block - get_kmalloc_delta(*kmeta), ksize(block) + sizeof(kmalloc_meta_data));
 	} else
 		__free_pages(sp, compound_order(sp));
 }
@@ -503,7 +488,7 @@ size_t ksize(const void *block)
 	if (unlikely(!PageSlab(sp)))
 		return PAGE_SIZE << compound_order(sp);
 
-        m = (kmalloc_meta_data *)((void *)block - KMALLOC_SIZE_BUF_SIZE);
+        m = (kmalloc_meta_data *)((void *)block - BYTES_OF_META_DATA);
         size = get_kmalloc_size(*m);
 	return size;
 }
@@ -571,9 +556,10 @@ EXPORT_SYMBOL(kmem_cache_alloc_node);
 
 static void __kmem_cache_free(void *b, int size)
 {
-	if (size < AVAILABLE_PER_PAGE)
-		slob_free(b, size);
-	else
+	if (size < AVAILABLE_PER_PAGE){
+                kmalloc_meta_data *kmeta = (kmalloc_meta_data *)((void *)b - BYTES_OF_META_DATA);
+		slob_free(b - get_kmalloc_delta(*kmeta), size);
+        }else
 		slob_free_pages(b, get_order(size));
 }
 
