@@ -86,23 +86,22 @@ struct page_cache_head {
         unsigned short size;
 };
 
-typedef unsigned short kmalloc_meta_data;
-#define BYTES_OF_META_DATA (sizeof(kmalloc_meta_data))
+typedef unsigned int sloba_meta_data;
+#define BYTES_OF_META_DATA (sizeof(sloba_meta_data))
 
-
-inline static unsigned short get_kmalloc_size(kmalloc_meta_data kmeta)
+inline static unsigned short meta_get_size(sloba_meta_data kmeta)
 {
-        return (kmeta >> 8) << 3;
+        return kmeta >> 16;
 }
 
-inline static unsigned short get_kmalloc_delta(kmalloc_meta_data kmeta)
+inline static unsigned short meta_get_delta(sloba_meta_data kmeta)
 {
-        return (kmeta & 0x00ff) << 3; 
+        return kmeta & 0x00ff;
 }
 
-inline static kmalloc_meta_data encode_kmalloc_meta_data(unsigned short size, unsigned short delta)
+inline static sloba_meta_data encode_sloba_meta_data(unsigned short size, unsigned short delta)
 {
-        return (kmalloc_meta_data)((size >> 3) << 8) | (delta >> 3);
+        return (sloba_meta_data)((size << 16) | (delta));
 }
 
 #define AVAILABLE_PER_PAGE (PAGE_SIZE - sizeof(struct page_cache_head))
@@ -347,17 +346,17 @@ static void *slob_alloc(size_t size, gfp_t gfp, int align, int node, char way)
         b = (void *)(page_cache_get_head(page_head) + (slob_list->size * (--page_head->avail)));
 
 done:
+        spin_lock_irqsave(&slob_lock, flags);
         page_head->counter++;
-        ret = (void *)ALIGN((unsigned long)b + sizeof(kmalloc_meta_data), align);
+        ret = (void *)ALIGN((unsigned long)b + BYTES_OF_META_DATA, align);
 
         {
                 int delta = ret - b;
-                spin_lock_irqsave(&slob_lock, flags);
-                *((kmalloc_meta_data *)ret - 1) = encode_kmalloc_meta_data(size - sizeof(kmalloc_meta_data), delta);
+                *((sloba_meta_data *)ret - 1) = encode_sloba_meta_data(size - BYTES_OF_META_DATA, delta);
         }
 
 	if (unlikely(gfp & __GFP_ZERO))
-		memset(ret, 0, size - sizeof(kmalloc_meta_data));
+		memset(ret, 0, size - BYTES_OF_META_DATA);
 
         spin_unlock_irqrestore(&slob_lock, flags);
         
@@ -401,7 +400,7 @@ static __always_inline void *
 __do_kmalloc_node(size_t size, gfp_t gfp, int node, unsigned long caller)
 {
         int align = max_t(size_t, ARCH_KMALLOC_MINALIGN, ARCH_SLAB_MINALIGN);
-        size_t aligned = (size + sizeof(kmalloc_meta_data));
+        size_t aligned = (size + BYTES_OF_META_DATA);
 	void *ret;
 
 	gfp &= gfp_allowed_mask;
@@ -426,7 +425,7 @@ __do_kmalloc_node(size_t size, gfp_t gfp, int node, unsigned long caller)
 		if (likely(order))
 			gfp |= __GFP_COMP;
 		ret = slob_new_pages(gfp, order, node);
-
+                
 		trace_kmalloc_node(caller, ret,
 				   size, PAGE_SIZE << order, gfp, node);
 	}
@@ -466,8 +465,8 @@ void kfree(const void *block)
 
 	sp = virt_to_page(block);
 	if (PageSlab(sp)) {
-                kmalloc_meta_data *kmeta = (kmalloc_meta_data *)((void *)block - BYTES_OF_META_DATA);
-		slob_free(block - get_kmalloc_delta(*kmeta), ksize(block) + sizeof(kmalloc_meta_data));
+                sloba_meta_data *meta = (sloba_meta_data *)((void *)block - BYTES_OF_META_DATA);
+		slob_free(block - meta_get_delta(*meta), ksize(block) + BYTES_OF_META_DATA);
 	} else
 		__free_pages(sp, compound_order(sp));
 }
@@ -478,7 +477,7 @@ size_t ksize(const void *block)
 {
 	struct page *sp;
 	size_t size;
-	kmalloc_meta_data *m;
+	sloba_meta_data *m;
 
 	BUG_ON(!block);
 	if (unlikely(block == ZERO_SIZE_PTR))
@@ -488,8 +487,8 @@ size_t ksize(const void *block)
 	if (unlikely(!PageSlab(sp)))
 		return PAGE_SIZE << compound_order(sp);
 
-        m = (kmalloc_meta_data *)((void *)block - BYTES_OF_META_DATA);
-        size = get_kmalloc_size(*m);
+        m = (sloba_meta_data *)((void *)block - BYTES_OF_META_DATA);
+        size = meta_get_size(*m);
 	return size;
 }
 EXPORT_SYMBOL(ksize);
@@ -516,7 +515,7 @@ static void *slob_alloc_node(struct kmem_cache *c, gfp_t flags, int node)
 	if (c->size < GO_BUDDY_SYSTEM) {
                 if(!c->size)
                         return ZERO_SIZE_PTR;
-		b = slob_alloc(c->size, flags, c->align, node, KMEM_CACHE_ALLOCATE);
+		b = slob_alloc(c->size + BYTES_OF_META_DATA, flags, c->align, node, KMEM_CACHE_ALLOCATE);
 		trace_kmem_cache_alloc_node(_RET_IP_, b, c->object_size,
 					    c->size,
 					    flags, node);
@@ -556,9 +555,9 @@ EXPORT_SYMBOL(kmem_cache_alloc_node);
 
 static void __kmem_cache_free(void *b, int size)
 {
-	if (size < AVAILABLE_PER_PAGE){
-                kmalloc_meta_data *kmeta = (kmalloc_meta_data *)((void *)b - BYTES_OF_META_DATA);
-		slob_free(b - get_kmalloc_delta(*kmeta), size);
+	if (size < GO_BUDDY_SYSTEM){
+                sloba_meta_data *kmeta = (sloba_meta_data *)((void *)b - BYTES_OF_META_DATA);
+		slob_free(b - meta_get_delta(*kmeta), size);
         }else
 		slob_free_pages(b, get_order(size));
 }
@@ -567,7 +566,6 @@ static void kmem_rcu_free(struct rcu_head *head)
 {
 	struct slob_rcu *slob_rcu = (struct slob_rcu *)head;
 	void *b = (void *)slob_rcu - (slob_rcu->size - sizeof(struct slob_rcu));
-
 	__kmem_cache_free(b, slob_rcu->size);
 }
 
