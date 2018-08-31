@@ -318,21 +318,21 @@ static void *slob_alloc(size_t size, gfp_t gfp, int align, int node, char way)
         void *ret = NULL;
         unsigned long flags;
         size_t aligned_size = size + align;
-        struct cache_array *slob_list = get_proper_sloba_list(aligned_size);
+        struct cache_array *sloba_cache = get_proper_sloba_list(aligned_size);
         struct page_cache_head *page_head;
         
         /*
          * this cache_array is not initialized
          */
-        if(!slob_list->head)
-                if(!cache_array_init_firstpage(slob_list, gfp, node))
+        if(!sloba_cache->head)
+                if(!cache_array_init_firstpage(sloba_cache, gfp, node))
                         return NULL;
 
         spin_lock_irqsave(&slob_lock, flags);
         // we'll allocate slab from this page
-        page_head = slob_list->last;
+        page_head = sloba_cache->last;
 
-        if((b = sloba_alloc_from_freelist(page_head, slob_list->size))){
+        if((b = sloba_alloc_from_freelist(page_head, sloba_cache->size))){
                 spin_unlock_irqrestore(&slob_lock, flags);
                 goto done;
         }
@@ -340,20 +340,17 @@ static void *slob_alloc(size_t size, gfp_t gfp, int align, int node, char way)
         
         // if this page is not available, find available page
         if(!page_head->avail)
-                page_head = slob_list->last = sloba_alloc_new_page(page_head, gfp, node, slob_list->size);
+                page_head = sloba_cache->last = sloba_alloc_new_page(page_head, gfp, node, sloba_cache->size);
         
         // get slab from back
-        b = (void *)(page_cache_get_head(page_head) + (slob_list->size * (--page_head->avail)));
+        b = (void *)(page_cache_get_head(page_head) + (sloba_cache->size * (--page_head->avail)));
 
 done:
         spin_lock_irqsave(&slob_lock, flags);
         page_head->counter++;
         ret = (void *)ALIGN((unsigned long)b + BYTES_OF_META_DATA, align);
 
-        {
-                int delta = ret - b;
-                *((sloba_meta_data *)ret - 1) = encode_sloba_meta_data(size - BYTES_OF_META_DATA, delta);
-        }
+        *((sloba_meta_data *)ret - 1) = encode_sloba_meta_data(size - BYTES_OF_META_DATA, (unsigned short)(ret - b));
 
 	if (unlikely(gfp & __GFP_ZERO))
 		memset(ret, 0, size - BYTES_OF_META_DATA);
@@ -439,7 +436,7 @@ void *__kmalloc(size_t size, gfp_t gfp)
 	return __do_kmalloc_node(size, gfp, NUMA_NO_NODE, _RET_IP_);
 }
 EXPORT_SYMBOL(__kmalloc);
-
+s
 void *__kmalloc_track_caller(size_t size, gfp_t gfp, unsigned long caller)
 {
 	return __do_kmalloc_node(size, gfp, NUMA_NO_NODE, caller);
