@@ -373,19 +373,21 @@ static void slob_free(void *block, int size)
 
         page_head = (struct page_cache_head *)((unsigned long)block & PAGE_MASK);
         page_head->counter--;
-        if(is_dead_page(page_head) && !page_head->counter){
-                struct page *sp = virt_to_page(page_head);
-                if (slob_page_free(sp))
-			clear_slob_page_free(sp);
-                spin_unlock_irqrestore(&slob_lock, flags);
-                __ClearPageSlab(sp);
-		page_mapcount_reset(sp);
-                slob_free_pages(page_head, 0);
-                return;
+        if(is_dead_page(page_head)){
+                if(!page_head->counter){
+                        struct page *sp = virt_to_page(page_head);
+                        if (slob_page_free(sp))
+                                clear_slob_page_free(sp);
+                        spin_unlock_irqrestore(&slob_lock, flags);
+                        __ClearPageSlab(sp);
+                        page_mapcount_reset(sp);
+                        slob_free_pages(page_head, 0);
+                        return;
+                }
+        }else{
+                *(void **)block = page_head->freelist;
+                page_head->freelist = block;
         }
-
-        *(void **)block = page_head->freelist;
-        page_head->freelist = block;
         
         spin_unlock_irqrestore(&slob_lock, flags);
 }
@@ -436,7 +438,7 @@ void *__kmalloc(size_t size, gfp_t gfp)
 	return __do_kmalloc_node(size, gfp, NUMA_NO_NODE, _RET_IP_);
 }
 EXPORT_SYMBOL(__kmalloc);
-s
+
 void *__kmalloc_track_caller(size_t size, gfp_t gfp, unsigned long caller)
 {
 	return __do_kmalloc_node(size, gfp, NUMA_NO_NODE, caller);
