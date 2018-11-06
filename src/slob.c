@@ -89,16 +89,29 @@ struct page_cache_head {
 typedef unsigned int sloba_meta_data;
 #define BYTES_OF_META_DATA (sizeof(sloba_meta_data))
 
+/**
+ * meta_get_size: Get size of memory allocated with sloba_alloc from sloba meta data
+ * @kmeta: meta data
+ */
 inline static unsigned short meta_get_size(sloba_meta_data kmeta)
 {
         return kmeta >> 16;
 }
 
+/**
+ * meta_get_delta: メタデータから実際に確保したメモリアドレスと、returnしたメモリアドレスの差分を取得する
+ * @kmeta: メタデータ
+ */
 inline static unsigned short meta_get_delta(sloba_meta_data kmeta)
 {
         return kmeta & 0x00ff;
 }
 
+/**
+ * encode_sloba_meta_data: slobaのメタデータを生成する
+ * @size: sloba_allocで確保したメモリ領域のサイズ
+ * @delta: メタデータから実際に確保したメモリアドレスと、returnしたメモリアドレスの差分
+ */
 inline static sloba_meta_data encode_sloba_meta_data(unsigned short size, unsigned short delta)
 {
         return (sloba_meta_data)((size << 16) | (delta));
@@ -135,6 +148,10 @@ static unsigned short cache_sizes[] = {
         3072, 4096, 10000
 };
 
+/**
+ * page_cache_get_head: page_cache_headから、ページの利用可能な領域の先頭のアドレスを返す
+ * @p: ページの先頭
+ */
 static inline char *page_cache_get_head(struct page_cache_head *p)
 {
         return (char *)(&p[1]);
@@ -188,6 +205,10 @@ static int bins_index(size_t size)
         return 44;
 }
 
+/**
+ * get_proper_sloba_list: 要求されたサイズにあったcache_arrayを返す
+ * @size: 要求するサイズ
+ */
 static struct cache_array *get_proper_sloba_list(size_t size)
 {
         struct sloba_lists *sloba_lists;
@@ -196,6 +217,11 @@ static struct cache_array *get_proper_sloba_list(size_t size)
         return (((struct cache_array *)sloba_lists) + index);
 }
 
+/**
+ * page_head_init: ページを初期化する関数
+ * @head: page_cache_head構造体
+ * @cache_size: キャッシュのサイズ
+ */
 static inline void page_head_init(struct page_cache_head *head, unsigned short cache_size)
 {
         head->freelist = NULL;
@@ -249,14 +275,33 @@ static void *slob_new_pages(gfp_t gfp, int order, int node)
 	return page_address(page);
 }
 
+/**
+ * mark_dead_flag: mark dead flag
+ * @page_head: This page will be marked
+ */
 static inline void mark_dead_flag(struct page_cache_head *page_head)
 {
         page_head->avail = 0xDEAD;
 }
 
+/**
+ * is_dead_page: To check the page is filled and destroyed
+ * @page_head: The head of page
+ */
 static inline char is_dead_page(struct page_cache_head *page_head)
 {
         return page_head->avail == 0xDEAD;
+}
+
+/**
+ * write_sloba_meta_data: write metadata of sloba to unused area previous to head of address
+ * @head: The address which sloba_alloc will return
+ * @size: object size
+ * @gap: Gap between first argument and a head of address sloba allocated
+ */
+static inline void write_sloba_meta_data(void *head, size_t size, unsigned short gap)
+{
+        *((sloba_meta_data *)head - 1) = encode_sloba_meta_data(size, gap);
 }
 
 static void slob_free_pages(void *b, int order)
@@ -266,6 +311,11 @@ static void slob_free_pages(void *b, int order)
 	free_pages((unsigned long)b, order);
 }
 
+/**
+ * sloba_alloc_from_freelist: To alloc object space from freelist
+ * @page_head: The freelist in this page will be refered to allocate space
+ * @size: required size
+ */
 static void *sloba_alloc_from_freelist(struct page_cache_head *page_head, size_t size)
 {
         // available space is found in freelist
@@ -277,6 +327,12 @@ static void *sloba_alloc_from_freelist(struct page_cache_head *page_head, size_t
         return NULL;
 }
 
+/**
+ * cache_array_init_firstpage: cache_arrayを初期化する関数
+ * @ca: 初期化するcache_array構造体
+ * @gfp: gfp
+ * @node: node
+ */
 static void *cache_array_init_firstpage(struct cache_array *ca, gfp_t gfp, int node)
 {
         unsigned long flags;
@@ -293,6 +349,12 @@ static void *cache_array_init_firstpage(struct cache_array *ca, gfp_t gfp, int n
         return ca->head;
 }
 
+/**
+ * sloba_alloc_new_page: To allocate new page
+ * @page_head: Old page, This page will be marked dead flag
+ * @gfp: To use get new page
+ * @size: required size
+ */
 static void *sloba_alloc_new_page(struct page_cache_head *page_head, gfp_t gfp, int node, size_t size)
 {
         struct page_cache_head *ret;
@@ -312,12 +374,19 @@ static void *sloba_alloc_new_page(struct page_cache_head *page_head, gfp_t gfp, 
         return ret;
 }
 
-static void *slob_alloc(size_t size, gfp_t gfp, int align, int node, char way)
+/**
+ * sloba_alloc: The core process of allocating memory
+ * @size: required size
+ * @gfp: gfp options
+ * @align: align
+ * @node: node
+ */
+static void *sloba_alloc(size_t size, gfp_t gfp, int align, int node)
 {
 	void *b = NULL;
         void *ret = NULL;
         unsigned long flags;
-        size_t aligned_size = size + align;
+        size_t aligned_size = size + BYTES_OF_META_DATA + align;
         struct cache_array *sloba_cache = get_proper_sloba_list(aligned_size);
         struct page_cache_head *page_head;
         
@@ -350,17 +419,23 @@ done:
         page_head->counter++;
         ret = (void *)ALIGN((unsigned long)b + BYTES_OF_META_DATA, align);
 
-        *((sloba_meta_data *)ret - 1) = encode_sloba_meta_data(size - BYTES_OF_META_DATA, (unsigned short)(ret - b));
+        //*((sloba_meta_data *)ret - 1) = encode_sloba_meta_data(size - BYTES_OF_META_DATA, (unsigned short)(ret - b));
+        write_sloba_meta_data(ret, size, (unsigned short)(ret - b));
 
 	if (unlikely(gfp & __GFP_ZERO))
-		memset(ret, 0, size - BYTES_OF_META_DATA);
+		memset(ret, 0, size);
 
         spin_unlock_irqrestore(&slob_lock, flags);
         
 	return ret;
 }
 
-static void slob_free(void *block, int size)
+/**
+ * sloba_free: The core process of freeing memory
+ * @block: The head address of freeing memory space
+ * @size: size of memory space
+ */
+static void sloba_free(void *block, int size)
 {
         struct page_cache_head *page_head;
         unsigned long flags;
@@ -411,7 +486,7 @@ __do_kmalloc_node(size_t size, gfp_t gfp, int node, unsigned long caller)
 		if (!size)
 			return ZERO_SIZE_PTR;
 
-		ret = slob_alloc(aligned, gfp, align, node, KMALLOC_ALLOCATE);
+		ret = sloba_alloc(aligned, gfp, align, node);
 
 		if (!ret)
 			return NULL;
@@ -465,7 +540,7 @@ void kfree(const void *block)
 	sp = virt_to_page(block);
 	if (PageSlab(sp)) {
                 sloba_meta_data *meta = (sloba_meta_data *)((void *)block - BYTES_OF_META_DATA);
-		slob_free(block - meta_get_delta(*meta), ksize(block) + BYTES_OF_META_DATA);
+		sloba_free(block - meta_get_delta(*meta), ksize(block) + BYTES_OF_META_DATA);
 	} else
 		__free_pages(sp, compound_order(sp));
 }
@@ -514,7 +589,7 @@ static void *slob_alloc_node(struct kmem_cache *c, gfp_t flags, int node)
 	if (c->size < GO_BUDDY_SYSTEM) {
                 if(!c->size)
                         return ZERO_SIZE_PTR;
-		b = slob_alloc(c->size + BYTES_OF_META_DATA, flags, c->align, node, KMEM_CACHE_ALLOCATE);
+		b = sloba_alloc(c->size, flags, c->align, node);
 		trace_kmem_cache_alloc_node(_RET_IP_, b, c->object_size,
 					    c->size,
 					    flags, node);
@@ -556,7 +631,7 @@ static void __kmem_cache_free(void *b, int size)
 {
 	if (size < GO_BUDDY_SYSTEM){
                 sloba_meta_data *kmeta = (sloba_meta_data *)((void *)b - BYTES_OF_META_DATA);
-		slob_free(b - meta_get_delta(*kmeta), size);
+		sloba_free(b - meta_get_delta(*kmeta), size);
         }else
 		slob_free_pages(b, get_order(size));
 }
@@ -618,6 +693,10 @@ struct kmem_cache kmem_cache_boot = {
 	.align = ARCH_KMALLOC_MINALIGN,
 };
 
+/**
+ * init_sloba_lists: slobaのcache_arrayに初期値を入れておく関数
+ * @lists: cache_arrayのリスト
+ */
 void init_sloba_lists(struct sloba_lists *lists)
 {
         struct cache_array *heads = (struct cache_array *)lists;
