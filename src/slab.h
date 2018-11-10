@@ -18,12 +18,22 @@
  * SLUB is no longer needed.
  */
 
+#define CACHE_ARRAY_RCU 0x0001
+
 struct cache_array {
         union {
                 void *head; // address of first page
                 void *last; // last available page
         };
         unsigned short size;  // object size
+
+        /*
+         * kind of flag
+         * CACHE_ARRAY_RCU: used in RCU 
+         */
+        unsigned short flags; //flags
+
+        void *free_pages_list;
 };
 
 struct kmem_cache {
