@@ -394,8 +394,14 @@ static void *sloba_alloc_new_page(struct kmem_cache *cachep, struct cache_array 
         unsigned long flags;
         struct page_cache_head *old_page;
 
-        // next page has not been allocated yet, so allocate it
-        ret = slob_new_pages(gfp & ~__GFP_ZERO, 0, node);
+        if(c_array->free_pages_list){
+                spin_lock_irqsave(&slob_lock, flags);
+                ret = sloba_pop_stack_list(c_array->free_pages_list);
+                spin_unlock_irqrestore(&slob_lock, flags);
+        }else{
+                // next page has not been allocated yet, so allocate it
+                ret = slob_new_pages(gfp & ~__GFP_ZERO, 0, node);
+        }
 
         spin_lock_irqsave(&slob_lock, flags);
         old_page = c_array->head;
