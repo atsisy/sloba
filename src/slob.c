@@ -88,8 +88,8 @@ struct page_cache_head {
 
 static inline void dump_page_cache_head(struct page_cache_head *page_head)
 {
-        printk(KERN_ERR "freelist: 0x%x\navail: %d\ncounter: %d\nsize: %d\n",
-               page_head->freelist, page_head->avail, page_head->counter, page_head->size);
+        printk(KERN_DEBUG "freelist: 0x%llx\navail: %d\ncounter: %d\nsize: %d\n",
+               (u64)page_head->freelist, page_head->avail, page_head->counter, page_head->size);
 }
 
 typedef unsigned int sloba_meta_data;
@@ -224,7 +224,7 @@ static inline void *sloba_pop_stack_list(void *list_head)
  */
 static inline void mark_non_reusable_flag(struct page_cache_head *page_head)
 {
-        page_head->freelist = 0xDEAD;
+        page_head->freelist = (void *)0xDEAD;
 }
 
 /**
