@@ -624,16 +624,15 @@ EXPORT_SYMBOL(ksize);
 
 int __kmem_cache_create(struct kmem_cache *c, slab_flags_t flags)
 {
-        c->c_array = __kmalloc(sizeof(struct cache_array), GFP_KERNEL);
-        c->c_array->head = NULL;
-        c->c_array->free_pages_list = NULL;
-        c->c_array->size = c->size + BYTES_OF_META_DATA + c->align;
-        c->c_array->flags = 0;
+        c->c_array.head = NULL;
+        c->c_array.free_pages_list = NULL;
+        c->c_array.size = c->size + BYTES_OF_META_DATA + c->align;
+        c->c_array.flags = 0;
         
 	c->flags = flags;
         
 	if (flags & SLAB_TYPESAFE_BY_RCU) {
-		c->c_array->flags |= CACHE_ARRAY_RCU;
+		c->c_array.flags |= CACHE_ARRAY_RCU;
 	}
         
 	return 0;
@@ -648,12 +647,12 @@ static void *slob_alloc_node(struct kmem_cache *c, gfp_t flags, int node)
 	fs_reclaim_acquire(flags);
 	fs_reclaim_release(flags);
 
-	if (c->c_array->size < GO_BUDDY_SYSTEM) {
+	if (c->c_array.size < GO_BUDDY_SYSTEM) {
                 if(!c->size)
                         return ZERO_SIZE_PTR;
-		b = sloba_alloc(c, c->c_array, c->size, flags, c->align, node);
+		b = sloba_alloc(c, &c->c_array, c->size, flags, c->align, node);
 		trace_kmem_cache_alloc_node(_RET_IP_, b, c->object_size,
-					    c->c_array->size,
+					    c->c_array.size,
 					    flags, node);
 	} else {
 		b = slob_new_pages(flags, get_order(c->size), node);
@@ -698,8 +697,8 @@ static void kmem_rcu_free(struct rcu_head *head)
         
 	page = container_of(head, struct page, rcu_head);
 
-        if(page->slab_cache->c_array->size < GO_BUDDY_SYSTEM){
-                order = get_order(page->slab_cache->c_array->size);
+        if(page->slab_cache->c_array.size < GO_BUDDY_SYSTEM){
+                order = get_order(page->slab_cache->c_array.size);
                 sloba_free_pages(page_address(page), order);
         }else{
                 order = get_order(page->slab_cache->size);
@@ -727,7 +726,7 @@ static void __kmem_cache_free(struct cache_array *c_array, void *b, int size)
 void kmem_cache_free(struct kmem_cache *c, void *b)
 {
 	kmemleak_free_recursive(b, c->flags);
-        __kmem_cache_free(c->c_array, b, c->size);
+        __kmem_cache_free(&c->c_array, b, c->size);
 	trace_kmem_cache_free(_RET_IP_, b);
 }
 EXPORT_SYMBOL(kmem_cache_free);
@@ -775,32 +774,30 @@ static void sloba_cleanup_freepages_rcu(struct cache_array *c_array)
 
 void __kmem_cache_release(struct kmem_cache *c)
 {
-        kfree(c->c_array);
 }
 
 int __kmem_cache_shrink(struct kmem_cache *c)
 {
         if (unlikely(c->flags & SLAB_TYPESAFE_BY_RCU)) {
-                sloba_cleanup_freepages_rcu(c->c_array);
+                sloba_cleanup_freepages_rcu(&c->c_array);
 	} else {
-                sloba_cleanup_freepages(c->c_array);
+                sloba_cleanup_freepages(&c->c_array);
 	}
 
 	return 0;
 }
-
-struct cache_array cache_array_boot = {
-        .head = NULL,
-        .size = sizeof(struct kmem_cache) + BYTES_OF_META_DATA + 8,
-        .free_pages_list = NULL,
-        .flags = 0,
-};
 
 struct kmem_cache kmem_cache_boot = {
 	.name = "kmem_cache",
 	.size = sizeof(struct kmem_cache),
 	.flags = SLAB_PANIC,
 	.align = ARCH_KMALLOC_MINALIGN,
+        .c_array = {
+                .head = NULL,
+                .size = sizeof(struct kmem_cache) + BYTES_OF_META_DATA + 8,
+                .free_pages_list = NULL,
+                .flags = 0,
+        },
 };
 
 /**
@@ -821,7 +818,6 @@ void init_sloba_lists(struct sloba_lists *lists)
 void __init kmem_cache_init(void)
 {
         unsigned int cpu;
-        kmem_cache_boot.c_array = &cache_array_boot;
 	kmem_cache = &kmem_cache_boot;
 	
         for_each_possible_cpu(cpu){

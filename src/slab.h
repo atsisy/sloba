@@ -47,7 +47,7 @@ struct kmem_cache {
 	int refcount;		/* Use counter */
 	void (*ctor)(void *);	/* Called on object slot creation */
 	struct list_head list;	/* List of all slab caches on the system */
-        struct cache_array *c_array;
+        struct cache_array c_array;
 };
 
 #endif /* CONFIG_SLOB */
