@@ -771,19 +771,23 @@ static void sloba_cleanup_freepages_rcu(struct cache_array *c_array)
         }
 }
 
+static inline void sloba_free_stacked_pages(struct cache_array *c_array)
+{
+        if (unlikely(c_array->flags & CACHE_ARRAY_RCU)) {
+                sloba_cleanup_freepages_rcu(c_array);
+	} else {
+                sloba_cleanup_freepages(c_array);
+	}
+}
 
 void __kmem_cache_release(struct kmem_cache *c)
 {
+        sloba_free_stacked_pages(&c->c_array);
 }
 
 int __kmem_cache_shrink(struct kmem_cache *c)
 {
-        if (unlikely(c->flags & SLAB_TYPESAFE_BY_RCU)) {
-                sloba_cleanup_freepages_rcu(&c->c_array);
-	} else {
-                sloba_cleanup_freepages(&c->c_array);
-	}
-
+        sloba_free_stacked_pages(&c->c_array);
 	return 0;
 }
 
