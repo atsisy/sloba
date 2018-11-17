@@ -18,7 +18,8 @@
  * SLUB is no longer needed.
  */
 
-#define CACHE_ARRAY_RCU 0x0001
+#define CACHE_ARRAY_RCU     0x0001
+#define CACHE_ARRAY_KMALLOC 0x0002
 
 struct cache_array {
         union {
