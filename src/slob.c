@@ -46,28 +46,6 @@ static inline void dump_page_cache_head(struct page_cache_head *page_head)
                (u64)page_head->freelist, page_head->avail, page_head->counter, page_head->size);
 }
 
-typedef unsigned char sloba_meta_data;
-#define BYTES_OF_META_DATA (sizeof(sloba_meta_data))
-
-/**
- * meta_get_delta: メタデータから実際に確保したメモリアドレスと、returnしたメモリアドレスの差分を取得する
- * @kmeta: メタデータ
- */
-inline static unsigned short meta_get_delta(sloba_meta_data kmeta)
-{
-        return kmeta;
-}
-
-/**
- * encode_sloba_meta_data: slobaのメタデータを生成する
- * @size: sloba_allocで確保したメモリ領域のサイズ
- * @delta: メタデータから実際に確保したメモリアドレスと、returnしたメモリアドレスの差分
- */
-inline static sloba_meta_data encode_sloba_meta_data(unsigned char delta)
-{
-        return delta;
-}
-
 #define AVAILABLE_PER_PAGE (PAGE_SIZE - sizeof(struct page_cache_head))
 #define GO_BUDDY_SYSTEM (AVAILABLE_PER_PAGE >> 1)
 
@@ -251,16 +229,6 @@ static inline void clear_slob_page_free(struct page *sp)
 }
 
 /*
- * struct slob_rcu is inserted at the tail of allocated slob blocks, which
- * were created with a SLAB_TYPESAFE_BY_RCU slab. slob_rcu is used to free
- * the block using call_rcu.
- */
-struct slob_rcu {
-	struct rcu_head head;
-	int size;
-};
-
-/*
  * slob_lock protects all slob allocator structures.
  */
 static DEFINE_SPINLOCK(slob_lock);
@@ -280,17 +248,6 @@ static void *slob_new_pages(gfp_t gfp, int order, int node)
 		return NULL;
 
 	return page_address(page);
-}
-
-/**
- * write_sloba_meta_data: write metadata of sloba to unused area previous to head of address
- * @head: The address which sloba_alloc will return
- * @size: object size
- * @gap: Gap between first argument and a head of address sloba allocated
- */
-static inline void write_sloba_meta_data(void *head, size_t size, unsigned char gap)
-{
-        *((sloba_meta_data *)head - 1) = encode_sloba_meta_data(gap);
 }
 
 static void slob_free_pages(void *b, int order)
@@ -407,8 +364,7 @@ static void sloba_free_pages(void *page_head, int order)
 static void *sloba_alloc(struct kmem_cache *cachep, size_t size, gfp_t gfp, int align, int node)
 {
 	void *b = NULL;
-        void *ret = NULL;
-        unsigned long flags;
+        //unsigned long flags;
         struct page_cache_head *page_head;
         struct cache_array *sloba_cache = &cachep->c_array;
 
@@ -430,26 +386,17 @@ static void *sloba_alloc(struct kmem_cache *cachep, size_t size, gfp_t gfp, int 
                 page_head = sloba_alloc_new_page(cachep, sloba_cache, gfp, node);
         
         // get slab from back
-        //b = (void *)(page_cache_get_head(page_head) + (sloba_cache->size * (--page_head->avail)));
         b = (void *)(((void *)page_head) + PAGE_SIZE - (sloba_cache->size * (page_head->avail--)));
 done:
         //spin_lock_irqsave(&slob_lock, flags);
         page_head->counter++;
-
-        if(is_cache_array_for_kmalloc(sloba_cache)){
-                ret = b;
-                //printk(KERN_ERR "required size = %d, actual allocated size = %d", size, sloba_cache->size);
-        }else{
-                ret = (void *)ALIGN((unsigned long)b + BYTES_OF_META_DATA, align);
-                write_sloba_meta_data(ret, size, (unsigned char)(ret - b));
-        }
-
+        
 	if (unlikely(gfp & __GFP_ZERO))
-		memset(ret, 0, size);
+		memset(b, 0, size);
 
         //spin_unlock_irqrestore(&slob_lock, flags);
         
-	return ret;
+	return b;
 }
 
 /**
@@ -582,7 +529,7 @@ int __kmem_cache_create(struct kmem_cache *c, slab_flags_t flags)
 {
         c->c_array.head = NULL;
         c->c_array.free_pages_list = NULL;
-        c->c_array.size = c->size + BYTES_OF_META_DATA + c->align;
+        c->c_array.size = ALIGN(c->size, c->align);
         c->c_array.flags = 0;
         
 	c->flags = flags;
@@ -668,8 +615,7 @@ static void __kmem_cache_free(struct kmem_cache *cachep, void *b, int size)
         struct cache_array *c_array = &cachep->c_array;
         
 	if (c_array->size < GO_BUDDY_SYSTEM){
-                sloba_meta_data *kmeta = (sloba_meta_data *)((void *)b - BYTES_OF_META_DATA);
-		sloba_free(cachep, b - meta_get_delta(*kmeta), size);
+		sloba_free(cachep, b, size);
         }else{
                 if(c_array->flags & CACHE_ARRAY_RCU){
                         struct page *sp = virt_to_page(b);
@@ -755,7 +701,7 @@ struct kmem_cache kmem_cache_boot = {
 	.align = ARCH_KMALLOC_MINALIGN,
         .c_array = {
                 .head = NULL,
-                .size = sizeof(struct kmem_cache) + BYTES_OF_META_DATA + 8,
+                .size = ALIGN(sizeof(struct kmem_cache), ARCH_KMALLOC_MINALIGN),
                 .free_pages_list = NULL,
                 .flags = 0,
         },
@@ -794,3 +740,4 @@ void __init kmem_cache_init_late(void)
 {
 	slab_state = FULL;
 }
+
