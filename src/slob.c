@@ -291,13 +291,31 @@ static void *cache_array_init_firstpage(struct kmem_cache *cachep, struct cache_
         // if buddy system failed to allocate new page, return NULL
         if (!ca->head)
                 return NULL;
-        spin_lock_irqsave(&slob_lock, flags);
         page_head_init(cachep, ca->size);
         __SetPageSlab(virt_to_page(ca->head));
         __SetPageSlobFree(virt_to_page(ca->head));
-        spin_unlock_irqrestore(&slob_lock, flags);
         return ca->head;
 }
+
+static void *__sloba_alloc_new_page(struct cache_array *c_array, gfp_t gfp, int node)
+{
+        void *ret;
+        unsigned long flags;
+
+        if(c_array->free_pages_list){
+                spin_lock_irqsave(&slob_lock, flags);
+                ret = sloba_pop_stack_list(c_array->free_pages_list);
+                spin_unlock_irqrestore(&slob_lock, flags);
+                
+                if (unlikely(gfp & __GFP_ZERO))
+                        memset(ret, 0, c_array->size);
+        }else{
+                ret = slob_new_pages(gfp, get_order(c_array->size), node);
+        }
+
+        return ret;
+}
+
 
 /**
  * sloba_alloc_new_page: To allocate new page
@@ -307,28 +325,20 @@ static void *cache_array_init_firstpage(struct kmem_cache *cachep, struct cache_
 static void *sloba_alloc_new_page(struct kmem_cache *cachep, struct cache_array *c_array, gfp_t gfp, int node)
 {
         struct page_cache_head *ret;
-        unsigned long flags;
         struct page_cache_head *old_page;
+        struct page *ret_sp;
 
-        if(c_array->free_pages_list){
-                spin_lock_irqsave(&slob_lock, flags);
-                ret = sloba_pop_stack_list(c_array->free_pages_list);
-                spin_unlock_irqrestore(&slob_lock, flags);
-        }else{
-                // next page has not been allocated yet, so allocate it
-                ret = slob_new_pages(gfp & ~__GFP_ZERO, 0, node);
-        }
+        ret = __sloba_alloc_new_page(c_array, gfp & ~__GFP_ZERO, node);
+        ret_sp = virt_to_page(ret);
 
-        spin_lock_irqsave(&slob_lock, flags);
         old_page = c_array->head;
         mark_non_reusable_flag(old_page);
         
         c_array->head = ret;
         page_head_init(cachep, c_array->size);
         
-        __SetPageSlab(virt_to_page(ret));
-        __SetPageSlobFree(virt_to_page(ret));
-        spin_unlock_irqrestore(&slob_lock, flags);
+        __SetPageSlab(ret_sp);
+        __SetPageSlobFree(ret_sp);
 
         return ret;
 }
@@ -338,7 +348,6 @@ static void sloba_free_pages(void *page_head, int order)
         unsigned long flags;
         struct page *sp = virt_to_page(page_head);
 
-        spin_lock_irqsave(&slob_lock, flags);
         clear_sloba_page_cache(sp);
         if (slob_page_free(sp))
                 clear_slob_page_free(sp);
@@ -346,8 +355,6 @@ static void sloba_free_pages(void *page_head, int order)
         __ClearPageSlab(sp);
         page_mapcount_reset(sp);
 
-        spin_unlock_irqrestore(&slob_lock, flags);
-        
         slob_free_pages(page_head, 0);
         
         return;
@@ -358,10 +365,9 @@ static void sloba_free_pages(void *page_head, int order)
  * @sloba_cache: The memory space this function will return is allocated from this argument
  * @size: size of object
  * @gfp: gfp options
- * @align: align
  * @node: node
  */
-static void *sloba_alloc(struct kmem_cache *cachep, size_t size, gfp_t gfp, int align, int node)
+static void *sloba_alloc(struct kmem_cache *cachep, size_t size, gfp_t gfp, int node)
 {
 	void *b = NULL;
         //unsigned long flags;
@@ -435,7 +441,6 @@ static void sloba_free(struct kmem_cache *cachep, void *block, int size)
 static __always_inline void *
 __do_kmalloc_node(size_t size, gfp_t gfp, int node, unsigned long caller)
 {
-        int align = max_t(size_t, ARCH_KMALLOC_MINALIGN, ARCH_SLAB_MINALIGN);
 	void *ret;
 
 	gfp &= gfp_allowed_mask;
@@ -447,7 +452,7 @@ __do_kmalloc_node(size_t size, gfp_t gfp, int node, unsigned long caller)
 		if (!size)
 			return ZERO_SIZE_PTR;
 
-		ret = sloba_alloc(get_proper_sloba_list(size), size, gfp, align, node);
+		ret = sloba_alloc(get_proper_sloba_list(size), size, gfp, node);
 
 		if (!ret)
 			return NULL;
@@ -525,6 +530,25 @@ size_t ksize(const void *block)
 }
 EXPORT_SYMBOL(ksize);
 
+
+static void kmem_rcu_free(struct rcu_head *head)
+{
+	struct page *page;
+        int order;
+        
+	page = container_of(head, struct page, rcu_head);
+
+        if(page->slab_cache->c_array.size < GO_BUDDY_SYSTEM){
+                order = get_order(page->slab_cache->c_array.size);
+                sloba_free_pages(page_address(page), order);
+        }else{
+                order = get_order(page->slab_cache->size);
+                clear_sloba_page_cache(page);
+                slob_free_pages(page_address(page), order);
+        }
+}
+
+
 int __kmem_cache_create(struct kmem_cache *c, slab_flags_t flags)
 {
         c->c_array.head = NULL;
@@ -541,6 +565,26 @@ int __kmem_cache_create(struct kmem_cache *c, slab_flags_t flags)
 	return 0;
 }
 
+static void *sloba_alloc_large_object(struct kmem_cache *c, gfp_t gfp, int node)
+{
+        void *ret;
+
+        ret = __sloba_alloc_new_page(&c->c_array, gfp, node);
+        virt_to_page(ret)->slab_cache = c;
+
+        return ret;
+}
+
+static void sloba_free_large_object(struct cache_array *c_array, void *b, int size)
+{
+        if(c_array->flags & CACHE_ARRAY_RCU){
+                struct page *sp = virt_to_page(b);
+                call_rcu(&sp->rcu_head, kmem_rcu_free);
+        }else{
+                sloba_push_stack_list(c_array->free_pages_list, b);
+        }
+}
+
 static void *slob_alloc_node(struct kmem_cache *c, gfp_t flags, int node)
 {
 	void *b;
@@ -553,13 +597,12 @@ static void *slob_alloc_node(struct kmem_cache *c, gfp_t flags, int node)
 	if (c->c_array.size < GO_BUDDY_SYSTEM) {
                 if(!c->size)
                         return ZERO_SIZE_PTR;
-		b = sloba_alloc(c, c->size, flags, c->align, node);
+		b = sloba_alloc(c, c->size, flags, node);
 		trace_kmem_cache_alloc_node(_RET_IP_, b, c->object_size,
 					    c->c_array.size,
 					    flags, node);
 	} else {
-		b = slob_new_pages(flags, get_order(c->size), node);
-                virt_to_page(b)->slab_cache = c;
+                b = sloba_alloc_large_object(c, flags, node);
 		trace_kmem_cache_alloc_node(_RET_IP_, b, c->object_size,
 					    PAGE_SIZE << get_order(c->size),
 					    flags, node);
@@ -592,24 +635,6 @@ void *kmem_cache_alloc_node(struct kmem_cache *cachep, gfp_t gfp, int node)
 EXPORT_SYMBOL(kmem_cache_alloc_node);
 #endif
 
-
-static void kmem_rcu_free(struct rcu_head *head)
-{
-	struct page *page;
-        int order;
-        
-	page = container_of(head, struct page, rcu_head);
-
-        if(page->slab_cache->c_array.size < GO_BUDDY_SYSTEM){
-                order = get_order(page->slab_cache->c_array.size);
-                sloba_free_pages(page_address(page), order);
-        }else{
-                order = get_order(page->slab_cache->size);
-                clear_sloba_page_cache(page);
-                slob_free_pages(page_address(page), order);
-        }
-}
-
 static void __kmem_cache_free(struct kmem_cache *cachep, void *b, int size)
 {
         struct cache_array *c_array = &cachep->c_array;
@@ -617,13 +642,7 @@ static void __kmem_cache_free(struct kmem_cache *cachep, void *b, int size)
 	if (c_array->size < GO_BUDDY_SYSTEM){
 		sloba_free(cachep, b, size);
         }else{
-                if(c_array->flags & CACHE_ARRAY_RCU){
-                        struct page *sp = virt_to_page(b);
-                        call_rcu(&sp->rcu_head, kmem_rcu_free);
-                }else{
-                        clear_sloba_page_cache(virt_to_page(b));
-                        slob_free_pages(b, get_order(size));
-                }
+                sloba_free_large_object(c_array, b, size);
         }
 }
 
