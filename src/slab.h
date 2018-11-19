@@ -33,8 +33,6 @@ struct cache_array {
          * CACHE_ARRAY_RCU: used in RCU 
          */
         unsigned short flags; //flags
-
-        void *free_pages_list;
 };
 
 struct kmem_cache {
