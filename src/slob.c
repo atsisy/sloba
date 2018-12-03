@@ -436,7 +436,7 @@ void *__kmalloc(size_t size, gfp_t gfp)
 	return __do_kmalloc_node(size, gfp, NUMA_NO_NODE, _RET_IP_);
 }
 EXPORT_SYMBOL(__kmalloc);
-s
+
 void *__kmalloc_track_caller(size_t size, gfp_t gfp, unsigned long caller)
 {
 	return __do_kmalloc_node(size, gfp, NUMA_NO_NODE, caller);
