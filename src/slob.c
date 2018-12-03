@@ -486,10 +486,10 @@ static void sloba_free(void *block, int size)
 		return;
 	BUG_ON(!size);
 
-        spin_lock_irqsave(&slob_lock, flags);
-
 	page_head =
 		(struct page_cache_head *)((unsigned long)block & PAGE_MASK);
+
+        spin_lock_irqsave(&slob_lock, flags);
 	page_head->counter--;
 
         if(unlikely((page_head->flags & PAGE_HEAD_INFO_RELEASE_SOON) && !page_head->counter)){
