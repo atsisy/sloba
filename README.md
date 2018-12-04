@@ -1,18 +1,18 @@
 # sloba
 Simple and fast slab allocator using slob interface
 
-SLOBAはSLOBのインターフェースを用いメモリ管理アルゴリズムを0から書き直したシンプルで高速なSlab allocatorです。
+SLOBAはSLOBのソースコードを見て0から書き直したシンプルで高速なSlab allocatorです。
 
 # How to develop
 
-開発を簡単に行うためにいくつかのPythonスクリプトを用意しました。実行はPython3で行ってください。
+開発を簡単に行うためにいくつかのシェルスクリプトを用意しました。
 
-I prepared several Python scripts for easier development. Please run in Python 3.
+I prepared several shell scripts for easier development.
 
 ## Initialize
 
 ```sh
-$ python3 init.py
+$ ./init.sh
 ```
 
 このスクリプトはGitHubからLinuxカーネルのGitリポジトリをダウンロードします。
@@ -22,17 +22,26 @@ This script downloads linux kernel git repository.
 ## Build
 
 ```sh
-$ python3 build.py
+$ ./build.sh
 ```
 
-このスクリプトはsrc/slob.cをlinux/mm下にコピーしカーネルのビルドを行います。
+このスクリプトはsrc/slob.c, src/slab.hをlinux/mm下にコピーしカーネルのビルドを行います。
 
-This script copies src/slob.c under linux/mm and builds the kernel.
+This script copies src/slob.c and src/slab.h under linux/mm and builds the kernel.
+
+```sh
+$ ./build.sh update-config
+
+```
+
+"update-config"をオプションとして追加すると、src/.configをカーネルソースツリーのトップにコピーします。
+
+If you add "update-config" as an option for build.sh, this script copies src/.config to the top of the kernel source tree.
 
 ## Run
 
 ```sh
-$ python3 run.py [VM]
+$ ./run.sh [VM]
 ```
 
 このスクリプトはビルドされたカーネルをqemuまたはqemu-kvm上で動作させます。
