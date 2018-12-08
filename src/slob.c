@@ -619,7 +619,6 @@ int __kmem_cache_create(struct kmem_cache *c, slab_flags_t flags)
 static void *sloba_alloc_large_object(struct kmem_cache *c, gfp_t gfp, int node)
 {
 	void *ret;
-        unsigned long flags;
         unsigned int order = get_order(c->c_array.size);
         
         if (likely(order))
@@ -663,8 +662,7 @@ static void *slob_alloc_node(struct kmem_cache *c, gfp_t flags, int node)
 		trace_kmem_cache_alloc_node(_RET_IP_, b, c->object_size,
 					    c->c_array.size, flags, node);
 	} else {
-		b = slob_new_pages(flags, get_order(c->size), node);
-                virt_to_page(b)->slab_cache = c;
+                b = sloba_alloc_large_object(c, flags, node);
 		trace_kmem_cache_alloc_node(_RET_IP_, b, c->object_size,
 					    PAGE_SIZE << get_order(c->size),
 					    flags, node);
