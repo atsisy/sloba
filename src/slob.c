@@ -303,13 +303,6 @@ static void slob_free_pages(void *b, int order)
 	free_pages((unsigned long)b, order);
 }
 
-static void sloba_finalize_page(struct kmem_cache *cachep, struct page *sp)
-{
-        /*
-         * This is STUB
-         */
-}
-
 /**
  * sloba_alloc_from_freelist: To alloc object space from freelist
  * @page_head: The freelist in this page will be refered to allocate space
@@ -466,10 +459,11 @@ static void kmem_rcu_free(struct rcu_head *head)
 
         if(likely(PageSlab(page))){
                 sloba_pre_free_pages(page_head);
+                slob_free_pages(page_head, order);
         }else{
                 page->slab_cache = NULL;
+                __free_pages(page, order);
         }
-        slob_free_pages(page_head, order);
 }
 
 /**
