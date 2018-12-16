@@ -81,7 +81,7 @@ static inline char page_cache_is_smashed(struct page_cache_head *page_head)
         return page_head->smash_check != 0x1a;
 }
 
-#define AVAILABLE_PER_PAGE (PAGE_SIZE - sizeof(struct page_cache_head))
+#define AVAILABLE_PER_PAGE ((SLOBA_PAGE_SIZE) - sizeof(struct page_cache_head))
 #define GO_BUDDY_SYSTEM (AVAILABLE_PER_PAGE >> 1)
 
 struct sloba_lists {
@@ -326,6 +326,11 @@ static void *alloc_pages_from_buddy(gfp_t gfp, int order, int node)
 	return page_address(page);
 }
 
+static void *alloc_default_size_pages(gfp_t gfp, int node)
+{
+        return alloc_pages_from_buddy(gfp | __GFP_COMP, SLOBA_PAGE_ORDER, node);
+}
+
 /**
  * @free_slab_pages
  * free slab pages
@@ -337,6 +342,11 @@ static void free_slab_pages(void *b, int order)
 	if (current->reclaim_state)
 		current->reclaim_state->reclaimed_slab += 1 << order;
 	free_pages((unsigned long)b, order);
+}
+
+static void free_default_size_pages(void *b)
+{
+        free_slab_pages(b, SLOBA_PAGE_ORDER);
 }
 
 /**
@@ -372,7 +382,7 @@ static void *cache_array_init_firstpage(struct kmem_cache *cachep,
         void *ret;
         
 	// allocate new page
-        ret = alloc_pages_from_buddy(gfp & ~__GFP_ZERO, 0, node);
+        ret = alloc_default_size_pages(gfp & ~__GFP_ZERO, node);
         if (!ret)
 		return NULL;
         
@@ -405,7 +415,7 @@ static void *sloba_alloc_new_page(struct kmem_cache *cachep,
 	struct page *ret_sp;
         unsigned long flags;
         
-	ret = alloc_pages_from_buddy(gfp, get_order(c_array->size), node);
+        ret = alloc_default_size_pages(gfp & ~__GFP_ZERO, node);
 
         spin_lock_irqsave(&slob_lock, flags);
 
@@ -430,7 +440,7 @@ static void sloba_pre_free_pages(void *page_head)
 {        
         struct page *sp;
 
-        sp = virt_to_page(page_head);
+        sp = virt_to_head_page(page_head);
         sp->mapping = NULL;
 
         __ClearPageSlab(sp);
@@ -478,7 +488,7 @@ static void *sloba_alloc(struct kmem_cache *cachep, size_t size, gfp_t gfp,
 
 	// get slab from back
 	b = (void *)(((unsigned long long)page_head) +
-                     ((unsigned long long)PAGE_SIZE - (unsigned long long)(page_head->size * (page_head->avail--))));
+                     ((unsigned long long)SLOBA_PAGE_SIZE - (unsigned long long)(page_head->size * (page_head->avail--))));
 done:
 	page_head->counter++;
         spin_unlock_irqrestore(&slob_lock, flags);
@@ -499,18 +509,16 @@ done:
 static void kmem_rcu_free(struct rcu_head *head)
 {
 	struct page *page;
-        size_t size;
         void *page_head;
         int order;
 
 	page = container_of(head, struct page, rcu_head);
-        size = page->slab_cache->c_array.size;
-        order = get_order(size);
+        order = compound_order(page);
         page_head = page_address(page);
 
         if(likely(PageSlab(page))){
                 sloba_pre_free_pages(page_head);
-                free_slab_pages(page_head, order);
+                free_default_size_pages(page_head);
         }else{
                 page->slab_cache = NULL;
                 __free_pages(page, order);
@@ -526,14 +534,15 @@ static void kmem_rcu_free(struct rcu_head *head)
 static void sloba_free(void *block, int size)
 {
 	struct page_cache_head *page_head;
+        struct page *sp;
 	unsigned long flags;
 
 	if (unlikely(ZERO_OR_NULL_PTR(block)))
 		return;
 	BUG_ON(!size);
 
-	page_head =
-		(struct page_cache_head *)((unsigned long)block & PAGE_MASK);
+        sp = virt_to_head_page(block);
+	page_head = (struct page_cache_head *)page_address(sp);
 
         spin_lock_irqsave(&slob_lock, flags);
 	page_head->counter--;
@@ -541,11 +550,11 @@ static void sloba_free(void *block, int size)
         if(unlikely((page_head->flags & PAGE_HEAD_INFO_RELEASE_SOON) && !page_head->counter)){
                 if (is_non_reusable_page(page_head)) {
                         spin_unlock_irqrestore(&slob_lock, flags);
-			call_rcu(&virt_to_page(page_head)->rcu_head, kmem_rcu_free);
+			call_rcu(&sp->rcu_head, kmem_rcu_free);
 		} else {
                         spin_unlock_irqrestore(&slob_lock, flags);
                         sloba_pre_free_pages(page_head);
-                        free_slab_pages(page_head, 0);
+                        free_default_size_pages(page_head);
 		}
                 return;
 	} else {
@@ -636,7 +645,7 @@ void kfree(const void *block)
 		return;
 	kmemleak_free(block);
 
-        sp = virt_to_page(block);
+        sp = virt_to_head_page(block);
 	if (likely(PageSlab(sp))) {
                 size_t size = ksize(block);
                 sloba_free(block, size);
@@ -660,7 +669,7 @@ size_t ksize(const void *block)
 	if (unlikely(block == ZERO_SIZE_PTR))
 		return 0;
 
-	sp = virt_to_page(block);
+	sp = virt_to_head_page(block);
 	if (unlikely(!PageSlab(sp)))
 		return PAGE_SIZE << compound_order(sp);
 
