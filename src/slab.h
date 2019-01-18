@@ -30,7 +30,7 @@ struct cache_array {
 
         /*
          * kind of flag
-         * CACHE_ARRAY_RCU: used in RCU 
+         * CACHE_ARRAY_RCU: used in RCU
          */
         unsigned short flags; //flags
 };
@@ -42,6 +42,7 @@ struct kmem_cache {
 	slab_flags_t flags;	/* Active flags on the slab */
 	unsigned int useroffset;/* Usercopy region offset */
 	unsigned int usersize;	/* Usercopy region size */
+        unsigned int order;     /* gfp order */
 	const char *name;	/* Slab name for sysfs */
 	int refcount;		/* Use counter */
 	void (*ctor)(void *);	/* Called on object slot creation */
