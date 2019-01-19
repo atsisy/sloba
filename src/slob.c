@@ -309,7 +309,7 @@ static DEFINE_SPINLOCK(slob_lock);
  * @order order of page size
  * @node node
  */
-static void *alloc_pages_from_buddy(gfp_t gfp, int order, int node)
+static struct page *alloc_pages_from_buddy(gfp_t gfp, int order, int node)
 {
 	void *page;
 
@@ -323,7 +323,7 @@ static void *alloc_pages_from_buddy(gfp_t gfp, int order, int node)
 	if (!page)
 		return NULL;
 
-	return page_address(page);
+	return page;
 }
 
 /**
@@ -369,21 +369,22 @@ static void *cache_array_init_firstpage(struct kmem_cache *cachep,
 					int node)
 {
 	unsigned long flags;
-        void *ret;
+        struct page *sp;
         
 	// allocate new page
-        ret = alloc_pages_from_buddy(gfp & ~__GFP_ZERO, 0, node);
-        if (!ret)
+        sp = alloc_pages_from_buddy(gfp & ~__GFP_ZERO, 0, node);
+
+        // if buddy system failed to allocate new page, return NULL
+        if (!sp)
 		return NULL;
         
         spin_lock_irqsave(&slob_lock, flags);
 
-        c_array->head = ret;
-	// if buddy system failed to allocate new page, return NULL
+        c_array->head = page_address(sp);
         
 	page_head_init(c_array->head, cachep);
         
-	__SetPageSlab(virt_to_page(c_array->head));
+	__SetPageSlab(sp);
 
         spin_unlock_irqrestore(&slob_lock, flags);
 	return c_array->head;
@@ -401,24 +402,24 @@ static void *sloba_alloc_new_page(struct kmem_cache *cachep,
 				  struct cache_array *c_array, gfp_t gfp,
 				  int node)
 {
-	struct page_cache_head *ret;
-	struct page *ret_sp;
+	struct page *new_sp;
         unsigned long flags;
         
-	ret = alloc_pages_from_buddy(gfp, cachep->order, node);
+	new_sp = alloc_pages_from_buddy(gfp, cachep->order, node);
+        if (!new_sp)
+		return NULL;
 
         spin_lock_irqsave(&slob_lock, flags);
 
         ((struct page_cache_head *)(c_array->head))->flags |= PAGE_HEAD_INFO_RELEASE_SOON;
 
-        ret_sp = virt_to_page(ret);
-	c_array->head = ret;
-        page_head_init(ret, cachep);
-	__SetPageSlab(ret_sp);
+	c_array->head = page_address(new_sp);
+        page_head_init(c_array->head, cachep);
+	__SetPageSlab(new_sp);
 
         spin_unlock_irqrestore(&slob_lock, flags);
 
-	return ret;
+	return c_array->head;
 }
 
 /**
@@ -579,7 +580,7 @@ static __always_inline void *__do_kmalloc_node(size_t size, gfp_t gfp, int node,
 
 		if (likely(order))
 			gfp |= __GFP_COMP;
-		ret = alloc_pages_from_buddy(gfp, order, node);
+		ret = page_address(alloc_pages_from_buddy(gfp, order, node));
 		trace_kmalloc_node(caller, ret, size, PAGE_SIZE << order, gfp,
 				   node);
 	}
@@ -632,7 +633,7 @@ void kfree(const void *block)
         sp = virt_to_page(block);
 	if (likely(PageSlab(sp))) {
                 size_t size = ksize(block);
-                sloba_free(block, size);
+                sloba_free((void *)block, size);
 	} else {
                 __free_pages(sp, compound_order(sp));
         }
@@ -682,12 +683,16 @@ int __kmem_cache_create(struct kmem_cache *c, slab_flags_t flags)
 static void *sloba_alloc_large_object(struct kmem_cache *c, gfp_t gfp, int node)
 {
 	void *ret;
+        struct page *sp;
         
         if (likely(c->order))
                 gfp |= __GFP_COMP;
-        ret = alloc_pages_from_buddy(gfp & ~__GFP_ZERO, c->order, node);
-
-        virt_to_page(ret)->slab_cache = c;
+        sp = alloc_pages_from_buddy(gfp & ~__GFP_ZERO, c->order, node);
+        if (!sp)
+		return NULL;
+        
+        sp->slab_cache = c;
+        ret = page_address(sp);
 
 	if (unlikely(gfp & __GFP_ZERO))
 		memset(ret, 0, c->size);
