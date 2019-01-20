@@ -427,13 +427,9 @@ static void *sloba_alloc_new_page(struct kmem_cache *cachep,
  * some operations for freeing pages
  * @page_head address of page that will be free
  */
-static void sloba_pre_free_pages(void *page_head)
+static void sloba_pre_free_pages(struct page *sp)
 {
-        struct page *sp;
-
-        sp = virt_to_page(page_head);
         sp->mapping = NULL;
-
         __ClearPageSlab(sp);
         page_mapcount_reset(sp);
 }
@@ -500,15 +496,13 @@ done:
 static void kmem_rcu_free(struct rcu_head *head)
 {
 	struct page *page;
-        void *page_head;
         int order;
 
 	page = container_of(head, struct page, rcu_head);
         order = page->slab_cache->order;
-        page_head = page_address(page);
 
-        sloba_pre_free_pages(page_head);
-        __free_pages(page, order);
+        sloba_pre_free_pages(page);
+        free_slab_pages(page_address(page), order);
 }
 
 /**
@@ -538,7 +532,7 @@ static void sloba_free(void *block, int size)
 			call_rcu(&virt_to_page(page_head)->rcu_head, kmem_rcu_free);
 		} else {
                         spin_unlock_irqrestore(&slob_lock, flags);
-                        sloba_pre_free_pages(page_head);
+                        sloba_pre_free_pages(virt_to_page(page_head));
                         free_slab_pages(page_head, 0);
 		}
                 return;
@@ -707,16 +701,15 @@ static void *sloba_alloc_large_object(struct kmem_cache *c, gfp_t gfp, int node)
  * @b head address of memory that will be freed
  * @size real size of object (not aligned)
  */
-static void sloba_free_large_object(struct kmem_cache *c, void *b,
-				    int size)
+static void sloba_free_large_object(struct kmem_cache *c, void *b)
 {
         struct page *sp = virt_to_page(b);
 
 	if (unlikely(c->flags & SLAB_TYPESAFE_BY_RCU)) {
 		call_rcu(&sp->rcu_head, kmem_rcu_free);
 	} else {
-                sp->slab_cache = NULL;
-                free_slab_pages(page_address(sp), get_order(size));
+                sloba_pre_free_pages(sp);
+                free_slab_pages(page_address(sp), c->order);
 	}
 }
 
@@ -796,7 +789,7 @@ static void __kmem_cache_free(struct kmem_cache *cachep, void *b, int size)
 	if (likely(PageSlab(sp))) {
 		sloba_free(b, size);
 	} else {
-		sloba_free_large_object(cachep, b, size);
+		sloba_free_large_object(cachep, b);
 	}
 }
 
@@ -852,6 +845,7 @@ struct kmem_cache kmem_cache_boot = {
                 .size = ALIGN(sizeof(struct kmem_cache), ARCH_KMALLOC_MINALIGN),
                 .flags = 0,
         },
+        .order = get_order(sizeof(struct kmem_cache)),
 };
 
 /**
@@ -870,7 +864,7 @@ void init_sloba_list(struct sloba_lists *list)
                 heads->c_array.size = heads->size;
 		heads->c_array.flags = CACHE_ARRAY_KMALLOC;
                 heads->flags = 0;
-                heads->order = 0;
+                heads->order = get_order(heads->size);
 	}
 }
 
